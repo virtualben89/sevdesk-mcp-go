@@ -259,6 +259,23 @@ func TestListSlimAndPagination(t *testing.T) {
 	}
 }
 
+func TestTransactionDirectionMapping(t *testing.T) {
+	f := newFake(t)
+	cs := connect(t, f, readOpts, false)
+	for dir, want := range map[string]string{"incoming": "onlyDebit=true", "outgoing": "onlyCredit=true"} {
+		if out, isErr := call(t, cs, "list_transactions", map[string]any{"direction": dir, "is_booked": false, "check_account_id": 3}); isErr {
+			t.Fatal(out)
+		}
+		q := f.last().RawQuery
+		if !strings.Contains(q, want) || !strings.Contains(q, "isBooked=false") || !strings.Contains(q, "checkAccount%5Bid%5D=3") {
+			t.Errorf("%s: query %q lacks %s", dir, q, want)
+		}
+	}
+	if _, isErr := call(t, cs, "list_transactions", map[string]any{"direction": "sideways"}); !isErr {
+		t.Error("bad direction accepted")
+	}
+}
+
 func TestEndDateIsEndOfDay(t *testing.T) {
 	s, _ := unixStart("2026-01-31")
 	e, _ := unixEnd("2026-01-31")
@@ -313,8 +330,8 @@ func TestPDFDownload(t *testing.T) {
 	if isErr || !strings.Contains(out, `"content_base64":"JVBERi0xLjQK"`) || !strings.Contains(out, `"size_bytes":9`) {
 		t.Fatalf("%v %s", isErr, out)
 	}
-	if q := f.last().RawQuery; !strings.Contains(q, "preventSendBy=true") {
-		t.Errorf("preventSendBy missing: %s", q)
+	if q := f.last().RawQuery; q != "preventSendBy=true" {
+		t.Errorf("query must be exactly preventSendBy=true (download=true switches sevDesk to raw bytes): %s", q)
 	}
 	if _, isErr := call(t, cs, "download_document_pdf", map[string]any{"document_type": "voucher", "id": 3}); !isErr {
 		t.Error("voucher PDF should be rejected")

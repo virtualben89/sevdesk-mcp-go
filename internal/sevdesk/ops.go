@@ -75,7 +75,8 @@ type indexFile struct {
 // supplements are well-known read-only endpoints that the official OpenAPI
 // spec does not describe but that are needed to fill in create requests
 // (contact person, country, unit, categories, accounting types). They are
-// flagged in the operation index; see README for the caveat.
+// flagged in the operation index; see README for the caveat. The first block was verified read-only against a
+// live account, the DELETE entries too.
 var supplements = []Operation{
 	{Method: "GET", Path: "/SevUser", ID: "supplement.getSevUsers", Tag: "SevUser", Summary: "List users (ids for contactPerson)"},
 	{Method: "GET", Path: "/SevUser/{id}", ID: "supplement.getSevUserById", Tag: "SevUser", Summary: "Find user by ID"},
@@ -86,6 +87,11 @@ var supplements = []Operation{
 	{Method: "GET", Path: "/AccountDatev", ID: "supplement.getAccountDatev", Tag: "AccountDatev", Summary: "List DATEV accounts (voucher positions, sevdesk 2.0)"},
 	{Method: "GET", Path: "/PaymentMethod", ID: "supplement.getPaymentMethods", Tag: "PaymentMethod", Summary: "List payment methods"},
 	{Method: "GET", Path: "/CostCentre", ID: "supplement.getCostCentres", Tag: "CostCentre", Summary: "List cost centres"},
+	// Undocumented but working (verified against a live trial account): the official spec has no delete
+	// for these. Classified like every DELETE: booking tier.
+	{Method: "DELETE", Path: "/Invoice/{id}", ID: "supplement.deleteInvoice", Tag: "Invoice", Summary: "Delete an invoice (drafts; undocumented)"},
+	{Method: "DELETE", Path: "/Part/{id}", ID: "supplement.deletePart", Tag: "Part", Summary: "Delete a part (undocumented)"},
+	{Method: "DELETE", Path: "/Voucher/{id}", ID: "supplement.deleteVoucher", Tag: "Voucher", Summary: "Delete a voucher (undocumented)"},
 }
 
 // globalQuery are query parameters sevDesk accepts on (nearly) every list
@@ -115,7 +121,7 @@ func loadIndex() {
 	for i := range supplements {
 		o := supplements[i]
 		o.Supplement = true
-		o.Class = ClassRead
+		o.Class = classify(&o)
 		o.segs = strings.Split(strings.TrimPrefix(o.Path, "/"), "/")
 		index = append(index, &o)
 	}

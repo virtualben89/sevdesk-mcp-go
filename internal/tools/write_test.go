@@ -82,19 +82,89 @@ func TestCreateVoucherDraftAndSums(t *testing.T) {
 	f := newFake(t)
 	cs := connect(t, f, writeOpts, false)
 	out, isErr := call(t, cs, "create_voucher", map[string]any{"credit_debit": "D", "voucher_date": "2026-03-05", "supplier_name": "Lieferant",
-		"filename": "abc123.pdf", "positions": []any{map[string]any{"accounting_type_id": 9, "tax_rate": 19, "amount": 119}}})
+		"filename": "abc123.pdf", "tax_rule_id": 9, "positions": []any{map[string]any{"account_datev_id": 4266, "tax_rate": 19, "amount": 119}}})
 	if isErr {
 		t.Fatal(out)
 	}
 	b := bodyOf(t, f)
 	v := b["voucher"].(map[string]any)
 	p := b["voucherPosSave"].([]any)[0].(map[string]any)
+	if v["taxRule"].(map[string]any)["id"] != "9" || p["accountDatev"].(map[string]any)["id"].(float64) != 4266 {
+		t.Errorf("tax rule / account not passed: %v", b)
+	}
 	if v["status"].(float64) != 50 || p["sumNet"].(float64) != 100 || p["sumGross"].(float64) != 119 || b["filename"] != "abc123.pdf" {
 		t.Errorf("unexpected body %v", b)
 	}
 	if out, isErr := call(t, cs, "create_voucher", map[string]any{"credit_debit": "D", "voucher_date": "2026-03-05", "supplier_name": "x",
 		"filename": "../../etc/passwd", "positions": []any{map[string]any{"accounting_type_id": 9, "tax_rate": 19, "amount": 1}}}); !isErr {
 		t.Errorf("unsafe filename accepted: %s", out)
+	}
+}
+
+func TestVoucherNeedsTaxRule(t *testing.T) {
+	f := newFake(t)
+	cs := connect(t, f, writeOpts, false)
+	out, isErr := call(t, cs, "create_voucher", map[string]any{"credit_debit": "D", "voucher_date": "2026-03-05", "supplier_name": "x",
+		"positions": []any{map[string]any{"account_datev_id": 1, "tax_rate": 19, "amount": 1}}})
+	if !isErr || !strings.Contains(out, "tax_rule_id") {
+		t.Errorf("missing tax_rule_id accepted: %s", out)
+	}
+	if f.count() != 0 {
+		t.Error("request sent")
+	}
+}
+
+func TestOrderAndCreditNoteNeedNumber(t *testing.T) {
+	f := newFake(t)
+	cs := connect(t, f, writeOpts, false)
+	pos := []any{map[string]any{"name": "x", "quantity": 1, "price": 1, "tax_rate": 19}}
+	for _, tool := range []string{"create_order", "create_credit_note"} {
+		out, isErr := call(t, cs, tool, map[string]any{"contact_id": 5, "date": "2026-03-05", "contact_person_id": 1, "positions": pos})
+		if !isErr || !strings.Contains(out, "number is required") {
+			t.Errorf("%s without number: %s", tool, out)
+		}
+	}
+	if f.count() != 0 {
+		t.Error("request sent without number")
+	}
+	if out, isErr := call(t, cs, "create_credit_note", map[string]any{"contact_id": 5, "date": "2026-03-05", "contact_person_id": 1, "number": "GS-1", "positions": pos}); isErr {
+		t.Fatal(out)
+	}
+	cn := bodyOf(t, f)["creditNote"].(map[string]any)
+	if cn["bookingCategory"] != "PROVISION" || cn["taxRule"].(map[string]any)["id"] != "9" || cn["status"].(float64) != 100 || cn["creditNoteNumber"] != "GS-1" {
+		t.Errorf("credit note defaults: %v", cn)
+	}
+	if out, isErr := call(t, cs, "create_order", map[string]any{"contact_id": 5, "date": "2026-03-05", "contact_person_id": 1, "number": "AN-1", "positions": pos}); isErr {
+		t.Fatal(out)
+	}
+	o := bodyOf(t, f)["order"].(map[string]any)
+	if o["orderNumber"] != "AN-1" || o["orderType"] != "AN" || o["status"].(float64) != 100 || o["version"].(float64) != 0 {
+		t.Errorf("%v", o)
+	}
+}
+
+func TestGuidanceSlimSearchPaginate(t *testing.T) {
+	f := newFake(t)
+	f.handler = func(r *http.Request, _ string) (int, string) {
+		return 200, `{"objects":[` +
+			`{"accountDatevId":4266,"accountName":"Bürobedarf","accountNumber":"6815","description":"Papier","allowedReceiptTypes":["EXPENSE"],"allowedTaxRules":[{"id":9,"name":"VORST","description":"long text","taxRates":["NINETEEN"]}]},` +
+			`{"accountDatevId":1,"accountName":"Kaution","accountNumber":"1350","description":"x","allowedReceiptTypes":["EXPENSE"],"allowedTaxRules":[]},` +
+			`{"accountDatevId":2,"accountName":"Büroeinrichtung","accountNumber":"0650","description":"y","allowedReceiptTypes":["EXPENSE"],"allowedTaxRules":[]}]}`
+	}
+	cs := connect(t, f, readOpts, false)
+	out, isErr := call(t, cs, "list_accounting_guidance", map[string]any{"kind": "expense", "search": "büro", "limit": 1})
+	if isErr || !strings.Contains(out, `"total_matches":2`) || !strings.Contains(out, `"next_offset":1`) || !strings.Contains(out, "Bürobedarf") || strings.Contains(out, "Kaution") {
+		t.Fatalf("%s", out)
+	}
+	if strings.Contains(out, "Papier") || strings.Contains(out, "long text") || !strings.Contains(out, `"id":9`) {
+		t.Errorf("not slimmed: %s", out)
+	}
+	out, _ = call(t, cs, "list_accounting_guidance", map[string]any{"search": "papier", "full": true})
+	if !strings.Contains(out, "Papier") {
+		t.Errorf("full lost description: %s", out)
+	}
+	if out, isErr := call(t, cs, "list_accounting_guidance", map[string]any{"kind": "account_number"}); !isErr {
+		t.Errorf("missing account_number accepted: %s", out)
 	}
 }
 
@@ -158,8 +228,11 @@ func TestBookingTools(t *testing.T) {
 	if _, isErr := call(t, cs, "send_document_email", map[string]any{"document_type": "invoice", "id": 3, "to": "a@b.de, evil@x.de", "subject": "s", "text": "t"}); !isErr {
 		t.Error("multiple recipients accepted in 'to'")
 	}
-	if _, isErr := call(t, cs, "delete_object", map[string]any{"entity": "invoice", "id": 3}); !isErr {
-		t.Error("invoice delete accepted")
+	if _, isErr := call(t, cs, "delete_object", map[string]any{"entity": "bogus", "id": 3}); !isErr {
+		t.Error("unknown entity accepted")
+	}
+	if out, isErr := call(t, cs, "delete_object", map[string]any{"entity": "invoice", "id": 3}); isErr || f.last().Path != "/api/v1/Invoice/3" || f.last().Method != "DELETE" {
+		t.Errorf("invoice delete: %s %+v", out, f.last())
 	}
 	if out, isErr := call(t, cs, "delete_object", map[string]any{"entity": "contact", "id": 3}); isErr || f.last().Method != "DELETE" {
 		t.Errorf("%s", out)

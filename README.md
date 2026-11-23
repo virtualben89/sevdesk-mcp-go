@@ -84,9 +84,19 @@ Design notes:
 
 - List tools are **slim and paginated** (`limit` 1-100, `offset`, `next_offset` in the result); `full=true` returns complete objects.
 - Dates are `YYYY-MM-DD` (Europe/Berlin); the server converts them to the formats sevDesk expects.
-- `create_invoice`, `create_credit_note`, `create_order` and `create_voucher` **always create drafts**; `extra` can add attributes but cannot change `status`.
+- `create_invoice`, `create_credit_note`, `create_order` and `create_voucher` **always create drafts**; `extra` can add attributes but cannot change `status`. sevDesk quirks handled: orders and credit notes need an explicit `number`; credit notes (Gutschriften) only accept the tax rules 9/18/19/20 and booking category `PROVISION`; vouchers need `tax_rule_id` and `account_datev_id` from `list_accounting_guidance`.
 - `download_document_pdf` always sends `preventSendBy=true`, so fetching a PDF never marks a document as sent.
 - `sevdesk_call` only accepts paths found in the embedded operation index (generated from [api.sevdesk.de/openapi.yaml](https://api.sevdesk.de/openapi.yaml), regenerate with `scripts/gen_operations.py`), with numeric ids, no dot segments. Nine well-known read endpoints that the official spec omits (`/SevUser`, `/Category`, `/StaticCountry`, `/Unity`, `/AccountingType`, ...) are included and flagged `supplement`.
+
+## sevDesk quirks (verified against a live trial account)
+
+- IDs and numbers come back as **strings** (`"id":"123"`), and `GET` by id may wrap the object in a list; the tools unwrap it.
+- `getPdf?download=true` returns raw PDF bytes, without it JSON with base64 content. The PDF tool uses the JSON form.
+- `onlyCredit` / `onlyDebit` of the transaction list are inverted compared to their names. The tool exposes `direction=incoming|outgoing` instead.
+- Orders and credit notes need an explicit `number`; credit notes only accept tax rules 9, 18, 19, 20 and a booking category (`PROVISION`).
+- Marking an invoice as sent (`sendBy`) **enshrines** it: afterwards it can no longer be reset or deleted.
+- `DELETE` on a contact that still has documents answers 200 but deletes nothing. `DELETE /Invoice|/Part|/Voucher/{id}` work although the OpenAPI spec does not list them (indexed as `supplement`).
+- Bank transactions can only be created on file-import (CSV/MT940) accounts, not on the default offline account.
 
 ## Usage
 

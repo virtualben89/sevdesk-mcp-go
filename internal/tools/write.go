@@ -85,18 +85,18 @@ type CreateDocumentInput struct {
 	ContactPersonID int64          `json:"contact_person_id,omitempty" jsonschema:"sevDesk user id acting as contact person; omitted = the only user of the account is used (list with sevdesk_call GET /SevUser)"`
 	Date            string         `json:"date" jsonschema:"Document date (YYYY-MM-DD)"`
 	DeliveryDate    string         `json:"delivery_date,omitempty" jsonschema:"Delivery/service date (YYYY-MM-DD), defaults to the document date"`
-	Number          string         `json:"number,omitempty" jsonschema:"Document number; omitted = sevDesk assigns it"`
+	Number          string         `json:"number,omitempty" jsonschema:"Document number. Required for credit notes and orders (sevDesk does not assign one via API); invoices: omitted = sevDesk assigns it"`
 	Header          string         `json:"header,omitempty" jsonschema:"Heading, e.g. 'Rechnung Nr. 1'"`
 	HeadText        string         `json:"head_text,omitempty" jsonschema:"Intro text above the positions (basic HTML allowed)"`
 	FootText        string         `json:"foot_text,omitempty" jsonschema:"Closing text below the positions (basic HTML allowed)"`
 	Currency        string         `json:"currency,omitempty" jsonschema:"ISO 4217 code, default EUR"`
-	TaxRuleID       int            `json:"tax_rule_id,omitempty" jsonschema:"sevDesk tax rule: 1 taxable revenue (default), 2 EU reverse charge delivery, 3 EU, 4 non-EU, 5 tax-free, 11 small business (§19), 17-21 further rules"`
+	TaxRuleID       int            `json:"tax_rule_id,omitempty" jsonschema:"sevDesk tax rule: 1 taxable revenue (default), 2 EU reverse charge delivery, 3 EU, 4 non-EU, 5 tax-free, 11 small business (§19). Credit notes only accept 9 (default), 18, 19, 20"`
 	TaxText         string         `json:"tax_text,omitempty" jsonschema:"Tax note printed on the document, default 'Umsatzsteuer'"`
 	TimeToPay       int            `json:"time_to_pay,omitempty" jsonschema:"Payment target in days"`
 	Discount        int            `json:"discount,omitempty" jsonschema:"Overall discount in percent (integer)"`
 	InvoiceType     string         `json:"invoice_type,omitempty" jsonschema:"Invoices only: RE normal (default), WKR recurring, SR cancellation, AR partial, TR final"`
 	OrderType       string         `json:"order_type,omitempty" jsonschema:"Orders only: AN offer (default), AB order confirmation, LI delivery note"`
-	BookingCategory string         `json:"booking_category,omitempty" jsonschema:"Credit notes only: PROVISION, ROYALTY_ASSIGNED, ROYALTY_UNASSIGNED, UNDERACHIEVEMENT or ACCOUNTING_TYPE"`
+	BookingCategory string         `json:"booking_category,omitempty" jsonschema:"Credit notes only: PROVISION (default; the only value verified to work), ROYALTY_ASSIGNED, ROYALTY_UNASSIGNED, UNDERACHIEVEMENT or ACCOUNTING_TYPE"`
 	CountryID       int64          `json:"country_id,omitempty" jsonschema:"Address country id (1 = Germany default)"`
 	Positions       []DocPosition  `json:"positions" jsonschema:"Line items (at least one)"`
 	Extra           map[string]any `json:"extra,omitempty" jsonschema:"Further attributes of the document object (camelCase). status, objectName and mapAll cannot be overridden: documents are always created as draft"`
@@ -137,8 +137,8 @@ type UploadVoucherFileInput struct {
 
 // VoucherPosition is one line of a new voucher.
 type VoucherPosition struct {
-	AccountingTypeID int64   `json:"accounting_type_id,omitempty" jsonschema:"Booking account (AccountingType id); alternative: account_datev_id"`
-	AccountDatevID   int64   `json:"account_datev_id,omitempty" jsonschema:"DATEV account id (sevDesk update 2.0)"`
+	AccountingTypeID int64   `json:"accounting_type_id,omitempty" jsonschema:"Booking account as AccountingType id (older bookkeeping); alternative: account_datev_id"`
+	AccountDatevID   int64   `json:"account_datev_id,omitempty" jsonschema:"Booking account: accountDatevId from list_accounting_guidance (sevDesk 2.0)"`
 	TaxRate          float64 `json:"tax_rate" jsonschema:"Tax rate in percent"`
 	Amount           float64 `json:"amount" jsonschema:"Amount of the position"`
 	Net              bool    `json:"net,omitempty" jsonschema:"true: amount is net, false (default): amount is gross"`
@@ -155,7 +155,7 @@ type CreateVoucherInput struct {
 	Description  string            `json:"description,omitempty" jsonschema:"Voucher number / description"`
 	PayDate      string            `json:"pay_date,omitempty" jsonschema:"Due date (YYYY-MM-DD)"`
 	VoucherType  string            `json:"voucher_type,omitempty" jsonschema:"VOU normal (default) or RV recurring"`
-	TaxRuleID    int               `json:"tax_rule_id,omitempty" jsonschema:"sevDesk tax rule id (1 default; 2, 3, 4, 5, 11)"`
+	TaxRuleID    int               `json:"tax_rule_id" jsonschema:"sevDesk tax rule id; take it from allowedTaxRules[].id of the booking account in list_accounting_guidance"`
 	Currency     string            `json:"currency,omitempty" jsonschema:"ISO 4217 code, default EUR"`
 	Filename     string            `json:"filename,omitempty" jsonschema:"Attachment: the filename returned by upload_voucher_file"`
 	Positions    []VoucherPosition `json:"positions" jsonschema:"Voucher positions (at least one)"`
@@ -217,6 +217,9 @@ var deletable = map[string]string{
 	"credit_note":               "/CreditNote/%d",
 	"order":                     "/Order/%d",
 	"order_position":            "/OrderPos/%d",
+	"invoice":                   "/Invoice/%d",
+	"part":                      "/Part/%d",
+	"voucher":                   "/Voucher/%d",
 	"check_account":             "/CheckAccount/%d",
 	"check_account_transaction": "/CheckAccountTransaction/%d",
 	"tag":                       "/Tag/%d",
@@ -363,6 +366,9 @@ func (r *Registry) createDocument(ctx context.Context, sp docSpec, in CreateDocu
 	case sp.kind.key != "credit_note" && in.BookingCategory != "":
 		return nil, errors.New("booking_category only applies to create_credit_note")
 	}
+	if sp.kind.key != "invoice" && strings.TrimSpace(in.Number) == "" {
+		return nil, fmt.Errorf("number is required for %s: sevDesk does not assign one through the API. Follow the numbering of existing documents (see list_%ss, e.g. the highest number plus one)", sp.kind.pdfLabel, sp.kind.key)
+	}
 	person, err := r.contactPerson(ctx, in.ContactPersonID)
 	if err != nil {
 		return nil, err
@@ -374,6 +380,9 @@ func (r *Registry) createDocument(ctx context.Context, sp docSpec, in CreateDocu
 	taxRule := in.TaxRuleID
 	if taxRule == 0 {
 		taxRule = 1
+		if sp.kind.key == "credit_note" {
+			taxRule = 9 // sevDesk credit notes (Gutschriften) only accept the expense-side rules 9, 18, 19, 20
+		}
 	}
 	taxText := in.TaxText
 	if taxText == "" {
@@ -422,7 +431,11 @@ func (r *Registry) createDocument(ctx context.Context, sp docSpec, in CreateDocu
 		doc["orderType"] = t
 		doc["version"] = 0
 	case "credit_note":
-		putIf(doc, "bookingCategory", strings.ToUpper(in.BookingCategory))
+		bc := strings.ToUpper(in.BookingCategory)
+		if bc == "" {
+			bc = "PROVISION" // sevDesk rejects credit notes without a supported booking category
+		}
+		doc["bookingCategory"] = bc
 	}
 	if err := mergeExtra(doc, in.Extra, "status", "objectName", "mapAll", "enshrined", "id"); err != nil {
 		return nil, err
@@ -482,8 +495,8 @@ func (r *Registry) createVoucher(ctx context.Context, in CreateVoucherInput) (*m
 		vt = "VOU"
 	}
 	taxRule := in.TaxRuleID
-	if taxRule == 0 {
-		taxRule = 1
+	if taxRule <= 0 {
+		return nil, errors.New("tax_rule_id is required: take it from allowedTaxRules[].id of the booking account in list_accounting_guidance (e.g. 9 = deductible expenses)")
 	}
 	ccy := strings.ToUpper(strings.TrimSpace(in.Currency))
 	if ccy == "" {
@@ -512,7 +525,7 @@ func (r *Registry) createVoucher(ctx context.Context, in CreateVoucherInput) (*m
 	pos := make([]map[string]any, 0, len(in.Positions))
 	for i, p := range in.Positions {
 		if p.AccountingTypeID == 0 && p.AccountDatevID == 0 {
-			return nil, fmt.Errorf("positions[%d]: accounting_type_id or account_datev_id is required (see list_accounting_guidance)", i)
+			return nil, fmt.Errorf("positions[%d]: account_datev_id (from list_accounting_guidance) or accounting_type_id is required", i)
 		}
 		if p.Amount == 0 {
 			return nil, fmt.Errorf("positions[%d]: amount must not be 0", i)
@@ -783,7 +796,7 @@ func (r *Registry) registerWrite() {
 		description: "Upload a receipt (.pdf/.png/.jpg) to sevDesk's temporary storage and return its sevDesk filename for create_voucher(filename). Input is either path (inside the operator's SEVDESK_UPLOAD_DIR) or content_base64 + filename. Size is bounded by SEVDESK_MAX_UPLOAD_BYTES."},
 		r.uploadVoucherFile)
 	add(r, toolDef{name: "create_voucher", title: "Create voucher (draft)", class: sevdesk.ClassWrite,
-		description: "Create a voucher (Beleg / incoming document) as DRAFT (status 50) with positions. Find booking accounts with list_accounting_guidance; attach a file via upload_voucher_file first. Booking/enshrining needs the booking tier."},
+		description: "Create a voucher (Beleg / incoming document) as DRAFT (status 50) with positions. Find booking accounts and the matching tax_rule_id with list_accounting_guidance (search by name or number); attach a file via upload_voucher_file first. Booking/enshrining needs the booking tier."},
 		r.createVoucher)
 	add(r, toolDef{name: "create_transaction", title: "Create bank transaction", class: sevdesk.ClassWrite,
 		description: "Create a bank transaction on a check account. sevDesk only allows this for file-import/clearing accounts, not for FinTS/online-banking accounts."},
@@ -880,7 +893,7 @@ func (r *Registry) registerBooking() {
 
 	add(r, toolDef{name: "delete_object", title: "Delete object", class: sevdesk.ClassBooking, destructive: true,
 		enums:       map[string][]any{"entity": deletableKeys()},
-		description: "Delete an object permanently (contact, address, communication way, credit note, order, order position, check account, bank transaction, tag). Invoices and vouchers cannot be deleted this way: cancel invoices with document_action. sevDesk refuses deleting enshrined or booked objects."},
+		description: "Delete an object permanently (contact, address, communication way, invoice, credit note, order, order position, part, voucher, check account, bank transaction, tag). Intended for drafts and test data; sevDesk refuses deleting enshrined or booked documents (cancel finalised invoices with document_action instead)."},
 		func(ctx context.Context, in DeleteObjectInput) (*mcp.CallToolResult, error) {
 			f, ok := deletable[in.Entity]
 			if !ok {

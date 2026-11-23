@@ -173,7 +173,6 @@ if args.write:
                                            "positions": [{"name": "Smoke test", "quantity": 1, "price": 10, "tax_rate": 19}]})
         check("create_invoice (draft)", not err, out)
         if not err:
-            leftovers.append("invoice draft for contact %s (sevDesk API cannot delete invoices)" % cid)
             r2 = js(out).get("result", {})
             iid = int(((r2.get("invoice") if isinstance(r2, dict) else None) or {}).get("id", 0) or 0)
             if iid:
@@ -181,8 +180,12 @@ if args.write:
                 check("get_invoice(draft) status draft", not err and '"100"' in out.replace(" ", ""), out)
                 err, out = tool("list_document_positions", {"document_type": "invoice", "id": iid})
                 check("positions of new invoice", not err and "Smoke test" in out, out)
+                err, out = tool("download_document_pdf", {"document_type": "invoice", "id": iid})
+                check("download_document_pdf of a draft", not err and "JVBER" in out, out)
+                err, out = tool("delete_object", {"entity": "invoice", "id": iid})
+                check("delete_object invoice draft (cleanup)", not err, out)
 
-        err, out = tool("create_order", {"contact_id": cid, "date": time.strftime("%Y-%m-%d"), "header": "MCP smoke offer",
+        err, out = tool("create_order", {"contact_id": cid, "date": time.strftime("%Y-%m-%d"), "header": "MCP smoke offer", "number": "AN-MCP-%d" % int(time.time()),
                                          "positions": [{"name": "Smoke offer", "quantity": 1, "price": 5, "tax_rate": 19}]})
         check("create_order (draft offer)", not err, out)
         r3 = js(out).get("result", {})
@@ -190,53 +193,58 @@ if args.write:
         if oid:
             err, out = tool("delete_object", {"entity": "order", "id": oid})
             check("delete_object order (cleanup)", not err, out)
+        err, out = tool("create_credit_note", {"contact_id": cid, "date": time.strftime("%Y-%m-%d"), "header": "MCP smoke credit note", "number": "GS-MCP-%d" % int(time.time()),
+                                               "positions": [{"name": "Smoke credit", "quantity": 1, "price": 3, "tax_rate": 19}]})
+        check("create_credit_note (draft)", not err, out)
+        r5 = js(out).get("result", {})
+        gid = int(((r5.get("creditNote") if isinstance(r5, dict) else None) or {}).get("id", 0) or 0)
+        if gid:
+            err, out = tool("delete_object", {"entity": "credit_note", "id": gid})
+            check("delete_object credit note (cleanup)", not err, out)
 
     err, out = tool("create_part", {"name": "MCP-Smoke Part", "part_number": "MCP-%d" % int(time.time()), "price_net": 1, "tax_rate": 19})
     check("create_part", not err, out)
-    if not err:
-        leftovers.append("part MCP-Smoke Part (sevDesk API cannot delete parts)")
+    r4 = js(out).get("result")
+    pid = int((r4[0] if isinstance(r4, list) else r4 or {}).get("id", 0) or 0) if not err else 0
+    if pid:
+        err, out = tool("get_part_stock", {"id": pid})
+        check("get_part_stock", not err, out)
+        err, out = tool("delete_object", {"entity": "part", "id": pid})
+        check("delete_object part (cleanup)", not err, out)
 
     # voucher with file
     pdf = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n"
     err, out = tool("upload_voucher_file", {"content_base64": base64.b64encode(pdf).decode(), "filename": "smoke.pdf"})
     check("upload_voucher_file", not err, out)
     fname = (js(out).get("result") or {}).get("filename") if not err else None
-    _, g = tool("list_accounting_guidance", {"kind": "expense"})
-    acct = None
-    try:
-        first = (js(g) if isinstance(js(g), list) else js(g))
-        stack = [first]
-        while stack and not acct:
-            x = stack.pop()
-            if isinstance(x, dict):
-                if "accountDatev" in x and isinstance(x["accountDatev"], dict) and x["accountDatev"].get("id"):
-                    acct = ("datev", int(x["accountDatev"]["id"]))
-                stack.extend(x.values())
-            elif isinstance(x, list):
-                stack.extend(x)
-    except Exception:
-        pass
-    pos = {"tax_rate": 19, "amount": 11.9}
-    if acct:
-        pos["account_datev_id"] = acct[1]
-    else:
-        print("SKIP create_voucher: no booking account found in guidance (inspect list_accounting_guidance manually)")
-    if acct:
+    _, g = tool("list_accounting_guidance", {"kind": "expense", "search": "Bürobedarf", "limit": 1})
+    gi = (js(g).get("items") or [None])[0]
+    vid = None
+    if gi and gi.get("allowedTaxRules"):
+        rule = next((r["id"] for r in gi["allowedTaxRules"] if "NINETEEN" in (r.get("taxRates") or [])), gi["allowedTaxRules"][0]["id"])
         va = {"credit_debit": "D", "voucher_date": time.strftime("%Y-%m-%d"), "supplier_name": "MCP-Smoke Lieferant",
-              "description": "MCP smoke voucher", "positions": [pos]}
+              "description": "MCP smoke voucher", "tax_rule_id": int(rule),
+              "positions": [{"account_datev_id": int(gi["accountDatevId"]), "tax_rate": 19, "amount": 11.9}]}
         if fname:
             va["filename"] = fname
         err, out = tool("create_voucher", va)
         check("create_voucher (draft)", not err, out)
-        if not err:
-            leftovers.append("voucher draft MCP smoke voucher")
+        vid = int(((js(out).get("result") or {}).get("voucher") or {}).get("id", 0) or 0)
+        if vid:
+            err, out = tool("get_voucher", {"id": vid})
+            check("get_voucher(draft) status 50", not err and '"50"' in out.replace(" ", ""), out)
+            err, out = tool("list_document_positions", {"document_type": "voucher", "id": vid})
+            check("voucher positions", not err, out)
+            err, out = tool("delete_object", {"entity": "voucher", "id": vid})
+            check("delete_object voucher (cleanup)", not err, out)
+    else:
+        check("booking account found via list_accounting_guidance", False, g)
 
     if cid:
         err, out = tool("delete_object", {"entity": "contact", "id": cid})
-        if err:
-            leftovers.append("contact %s (referenced by documents: %s)" % (cid, out[:120]))
-        else:
-            print("cleanup: contact deleted")
+        check("delete_object contact (cleanup)", not err, out)
+        err, out = tool("get_contact", {"id": cid})
+        check("deleted contact is gone (404)", err and "404" in out, out)
     if leftovers:
         print("LEFTOVERS in the trial account:")
         for l in leftovers:

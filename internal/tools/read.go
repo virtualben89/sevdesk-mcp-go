@@ -135,6 +135,10 @@ type GuidanceInput struct {
 	Kind          string `json:"kind,omitempty" jsonschema:"all (default), revenue, expense, account_number or tax_rule"`
 	AccountNumber string `json:"account_number,omitempty" jsonschema:"Required for kind=account_number (e.g. 8400)"`
 	TaxRule       string `json:"tax_rule,omitempty" jsonschema:"Required for kind=tax_rule (tax rule id, e.g. 1)"`
+	Search        string `json:"search,omitempty" jsonschema:"Case-insensitive text matched against account name, number and description, e.g. Bürobedarf or 6815"`
+	Limit         int    `json:"limit,omitempty" jsonschema:"Items per page (1-100, default 50)"`
+	Offset        int    `json:"offset,omitempty" jsonschema:"Number of items to skip"`
+	Full          bool   `json:"full,omitempty" jsonschema:"Keep descriptions of accounts and tax rules"`
 }
 
 // ListCheckAccountsInput are the parameters of list_check_accounts.
@@ -158,8 +162,7 @@ type ListTransactionsInput struct {
 	PayeePayerName string `json:"payee_payer_name,omitempty" jsonschema:"Name of the other party contains this text"`
 	StartDate      string `json:"start_date,omitempty" jsonschema:"On or after this day (YYYY-MM-DD)"`
 	EndDate        string `json:"end_date,omitempty" jsonschema:"On or before this day (YYYY-MM-DD)"`
-	OnlyCredit     bool   `json:"only_credit,omitempty" jsonschema:"Only incoming payments"`
-	OnlyDebit      bool   `json:"only_debit,omitempty" jsonschema:"Only outgoing payments"`
+	Direction      string `json:"direction,omitempty" jsonschema:"incoming (money received) or outgoing (money paid); omit for both"`
 	Limit          int    `json:"limit,omitempty" jsonschema:"Items per page (1-100, default 50)"`
 	Offset         int    `json:"offset,omitempty" jsonschema:"Number of items to skip"`
 	Full           bool   `json:"full,omitempty" jsonschema:"Return complete objects instead of the slim view"`
@@ -303,7 +306,7 @@ func (r *Registry) registerRead() {
 
 	add(r, toolDef{name: "list_accounting_guidance", title: "List booking accounts / guidance", class: sevdesk.ClassRead,
 		enums:       map[string][]any{"kind": {"all", "revenue", "expense", "account_number", "tax_rule"}},
-		description: "Booking accounts (accounting types / Buchungskonten) and receipt guidance: which accounts and tax rules fit when creating a voucher. kind: all, revenue, expense, account_number (needs account_number) or tax_rule (needs tax_rule). Output is the upstream guidance list and can be long."},
+		description: "Booking accounts (Buchungskonten) with the tax rules and rates allowed for them: the lookup you need before create_voucher (accountDatevId -> account_datev_id, allowedTaxRules[].id -> tax_rule_id). kind: all, revenue, expense, account_number (needs account_number) or tax_rule (needs tax_rule). There are several hundred accounts: use search (name or number) and limit/offset. Slim by default (full=true keeps descriptions)."},
 		r.guidance)
 
 	add(r, toolDef{name: "list_check_accounts", title: "List check accounts", class: sevdesk.ClassRead,
@@ -342,7 +345,8 @@ func (r *Registry) registerRead() {
 		})
 
 	add(r, toolDef{name: "list_transactions", title: "List bank transactions", class: sevdesk.ClassRead,
-		description: "List bank transactions (CheckAccountTransaction) with filters for account, booked state, purpose, counterparty, dates and direction."},
+		enums:       map[string][]any{"direction": {"incoming", "outgoing"}},
+		description: "List bank transactions (CheckAccountTransaction) with filters for account, booked state, purpose, counterparty, dates and direction (incoming/outgoing)."},
 		func(ctx context.Context, in ListTransactionsInput) (*mcp.CallToolResult, error) {
 			p, err := r.page(in.Limit, in.Offset)
 			if err != nil {
@@ -372,11 +376,16 @@ func (r *Registry) registerRead() {
 			} else if q2 != "" {
 				q.Set("endDate", q2)
 			}
-			if in.OnlyCredit {
-				q.Set("onlyCredit", "true")
-			}
-			if in.OnlyDebit {
+			// sevDesk's flags are inverted compared to their names: onlyCredit returns outgoing payments
+			// (negative amounts), onlyDebit incoming ones (verified against the live API).
+			switch in.Direction {
+			case "":
+			case "incoming":
 				q.Set("onlyDebit", "true")
+			case "outgoing":
+				q.Set("onlyCredit", "true")
+			default:
+				return nil, errors.New("direction must be incoming or outgoing")
 			}
 			return r.listCall(ctx, "/CheckAccountTransaction", q, p, "transaction", in.Full, nil)
 		})
@@ -542,6 +551,10 @@ func (r *Registry) getStatus(ctx context.Context, in GetStatusInput) (*mcp.CallT
 }
 
 func (r *Registry) guidance(ctx context.Context, in GuidanceInput) (*mcp.CallToolResult, error) {
+	p, err := r.page(in.Limit, in.Offset)
+	if err != nil {
+		return nil, err
+	}
 	path := ""
 	q := url.Values{}
 	switch strings.ToLower(in.Kind) {
@@ -570,7 +583,61 @@ func (r *Registry) guidance(ctx context.Context, in GuidanceInput) (*mcp.CallToo
 	if err != nil {
 		return nil, err
 	}
-	return valueResult(m["objects"])
+	needle := strings.ToLower(strings.TrimSpace(in.Search))
+	var matched []any
+	for _, it := range objectsOf(m) {
+		if needle != "" {
+			mm, _ := it.(map[string]any)
+			hay := strings.ToLower(fmt.Sprint(mm["accountName"], " ", mm["accountNumber"], " ", mm["description"]))
+			if !strings.Contains(hay, needle) {
+				continue
+			}
+		}
+		matched = append(matched, it)
+	}
+	total := len(matched)
+	if p.offset >= len(matched) {
+		matched = nil
+	} else {
+		matched = matched[p.offset:min(len(matched), p.offset+p.limit)]
+	}
+	if !in.Full {
+		for i, it := range matched {
+			matched[i] = slimGuidance(it)
+		}
+	}
+	out := map[string]any{"items": nonNil(matched), "count": len(matched), "total_matches": total, "limit": p.limit, "offset": p.offset}
+	if p.offset+len(matched) < total {
+		out["next_offset"] = p.offset + len(matched)
+	}
+	return valueResult(out)
+}
+
+// slimGuidance drops descriptions from a guidance entry and its tax rules.
+func slimGuidance(it any) any {
+	m, ok := it.(map[string]any)
+	if !ok {
+		return it
+	}
+	out := map[string]any{}
+	for _, k := range []string{"accountDatevId", "accountNumber", "accountName", "allowedReceiptTypes"} {
+		if v, ok := m[k]; ok {
+			out[k] = v
+		}
+	}
+	if rules, ok := m["allowedTaxRules"].([]any); ok {
+		slim := make([]any, 0, len(rules))
+		for _, ru := range rules {
+			if rm, ok := ru.(map[string]any); ok {
+				slim = append(slim, map[string]any{"id": rm["id"], "name": rm["name"], "taxRates": rm["taxRates"]})
+			}
+		}
+		out["allowedTaxRules"] = slim
+	}
+	if len(out) == 0 {
+		return it
+	}
+	return out
 }
 
 func (r *Registry) downloadPDF(ctx context.Context, in PDFInput) (*mcp.CallToolResult, error) {
@@ -581,7 +648,8 @@ func (r *Registry) downloadPDF(ctx context.Context, in PDFInput) (*mcp.CallToolR
 	if err := needID("id", in.ID); err != nil {
 		return nil, err
 	}
-	q := url.Values{"download": {"true"}, "preventSendBy": {"true"}}
+	// Without download=true sevDesk answers with JSON (base64 content); with it the raw PDF bytes.
+	q := url.Values{"preventSendBy": {"true"}}
 	resp, err := r.do(ctx, sevdesk.Request{Method: "GET", Path: fmt.Sprintf("%s/%d/getPdf", k.path, in.ID), Query: q})
 	if err != nil {
 		return nil, err
