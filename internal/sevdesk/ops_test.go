@@ -59,9 +59,9 @@ func TestClassification(t *testing.T) {
 		"PUT /CreditNote/1/bookAmount":                 ClassBooking,
 		"GET /CreditNote/1/sendByWithRender":           ClassBooking,
 		"DELETE /Contact/1":                            ClassBooking,
-		"DELETE /Invoice/1": ClassBooking,
-		"DELETE /Voucher/1": ClassBooking,
-		"DELETE /Part/1": ClassBooking,
+		"DELETE /Invoice/1":                            ClassBooking,
+		"DELETE /Voucher/1":                            ClassBooking,
+		"DELETE /Part/1":                               ClassBooking,
 		"GET /Export/createDatevCsvZipExportJob":       ClassWrite,
 		"GET /SevUser":                                 ClassRead,
 	}
