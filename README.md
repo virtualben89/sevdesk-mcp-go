@@ -19,10 +19,10 @@ A [Model Context Protocol](https://modelcontextprotocol.io) server for the **[se
 | **read** (default) | `SEVDESK_READ_ONLY=true` | all `list_*` / `get_*` tools, PDF download, `sevdesk_list_operations`, `sevdesk_call` with GET only |
 | **write** | `SEVDESK_READ_ONLY=false` | create/update **drafts**: contacts, addresses, communication ways, invoices, credit notes, orders, parts, vouchers (+ file upload), bank transactions |
 | **booking** | additionally `SEVDESK_ALLOW_BOOKING=true` | everything that finalises or removes: `book_payment`, `document_action` (enshrine, mark sent, reset, cancel), `send_document_email`, `delete_object` |
-| **dry run** | `SEVDESK_DRY_RUN=true` | writes return the request that *would* be sent and send nothing (reads still run) |
+| **dry run** | `SEVDESK_DRY_RUN=true` | writes, and reads with side effects (e.g. `getPdf` without `preventSendBy=true`), return the request that *would* be sent and send nothing; plain reads still run |
 
 - Tools of a disabled tier are **not registered** (the model never sees them).
-- `sevdesk_call` classifies every operation (read / write / booking) from its HTTP method and path, and raises the class when the **content** requires it: a document `status` beyond draft in the body, `enshrine` flags, or `getPdf` without `preventSendBy=true` (that call can mark documents as sent). `sevdesk_list_operations` shows the class of each endpoint.
+- `sevdesk_call` classifies every operation (read / write / booking) from its HTTP method and path, and raises the class when the **content** requires it: a document `status` beyond draft in the body, any `enshrine`/`enshrineDocuments` value that is not clearly false (`false`, `0`, empty), or `getPdf` without exactly `preventSendBy=true` (sevDesk marks the document as sent **and enshrines it** for anything else, e.g. `" true"` or `2`). Flags are judged on the exact value that is sent upstream. `sevdesk_list_operations` shows the class of each endpoint.
 - Contradicting settings fail at startup instead of being guessed (e.g. `SEVDESK_ALLOW_WRITE=true` with the default `SEVDESK_READ_ONLY=true`). Unparseable booleans fail closed.
 - Over HTTP, write tiers require `MCP_AUTH_TOKEN` (no-auth mode is read-only only).
 
@@ -55,10 +55,10 @@ All settings are environment variables (`*_FILE` variants read the value from a 
 | `MCP_TRANSPORT` / `--transport` | `stdio` | `stdio` or `http` (the Docker image defaults to `http`) |
 | `MCP_HTTP_ADDR` | `:8080` | Listen address |
 | `MCP_HTTP_PATH` | `/mcp` | Streamable HTTP path |
-| `MCP_HTTP_ENABLE_SSE` | `true` | Serve legacy SSE on `/sse` |
+| `MCP_HTTP_ENABLE_SSE` | `true` | Serve legacy SSE on `/sse`. Always off with `SEVDESK_ALLOW_CLIENT_TOKEN=true` (SSE cannot pass per-client tokens to tool calls) |
 | `MCP_HTTP_STATELESS`, `MCP_HTTP_JSON_RESPONSE`, `MCP_HTTP_SESSION_TIMEOUT` | `false`, `false`, `30m` | Streamable HTTP options |
 | `MCP_AUTH_TOKEN` / `_FILE` | – | Bearer token(s), min. 16 chars, comma separated for rotation. **HTTP refuses to start without it** unless `MCP_ALLOW_NO_AUTH=true` (read-only only) |
-| `MCP_ALLOW_NO_AUTH` | `false` | Explicit opt-out of authentication (then only `localhost` + `MCP_ALLOWED_HOSTS` Host headers are accepted) |
+| `MCP_ALLOW_NO_AUTH` | `false` | Explicit opt-out of authentication, read-only only. Requires `MCP_HTTP_ADDR` on loopback (e.g. `127.0.0.1:8080`); only `localhost` + `MCP_ALLOWED_HOSTS` Host headers are accepted. The Host check protects against browsers/DNS rebinding, not against network peers |
 | `MCP_ALLOWED_HOSTS` | – | Extra Host header values |
 | `LOG_LEVEL`, `LOG_FORMAT` | `info`, `text` | Logs go to stderr; tokens are never logged |
 
@@ -198,7 +198,7 @@ mcp_servers:
 - Use a **dedicated sevDesk user** for the integration, so the token can be rotated or revoked without touching a person's login and actions show up under a recognisable name.
 - Try write features on a **sevDesk trial account** first. Keep `SEVDESK_READ_ONLY=true` for production unless you need writes; enable the booking tier only deliberately. Several actions (enshrine, sending invoices) are irreversible in sevDesk.
 - Keep tokens in `*_FILE` secrets, not in command lines. The server never logs tokens, and transport errors are stripped of URLs.
-- Put HTTP behind TLS (reverse proxy). The MCP bearer is compared in constant time; with `MCP_AUTH_TOKEN` set, sessions are bound to it. SSE sessions are pinned by this server.
+- Put HTTP behind TLS (reverse proxy). The MCP bearer is compared in constant time; with `MCP_AUTH_TOKEN` set, sessions are bound to it. SSE sessions are pinned by this server. A write that fails with a transport error or HTTP 5xx is reported as *ambiguous* (it may have been applied) and never retried: look the object up before trying again.
 - The sevDesk token is sent as the raw `Authorization` header to the configured base URL only; redirects are never followed.
 - Prompt injection is real: sevDesk data (contact names, notes, document texts) is untrusted input to the model. Do not combine write tiers with untrusted data sources unless a human confirms the tool calls.
 

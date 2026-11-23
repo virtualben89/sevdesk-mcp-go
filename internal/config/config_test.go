@@ -108,8 +108,21 @@ func TestHTTPAuthRules(t *testing.T) {
 	if c, err := load(t, with(h, "MCP_AUTH_TOKEN_FILE", f)); err != nil || c.AuthTokens[0] != mcpTok {
 		t.Errorf("_FILE: %v", err)
 	}
-	if _, err := load(t, with(h, "MCP_ALLOW_NO_AUTH", "true")); err != nil {
-		t.Errorf("no-auth read-only: %v", err)
+	if _, err := load(t, with(h, "MCP_ALLOW_NO_AUTH", "true", "MCP_HTTP_ADDR", "127.0.0.1:8080")); err != nil {
+		t.Errorf("no-auth read-only on loopback: %v", err)
+	}
+	for _, addr := range []string{":8080", "0.0.0.0:8080", "192.168.1.5:8080", "[::]:8080"} {
+		if _, err := load(t, with(h, "MCP_ALLOW_NO_AUTH", "true", "MCP_HTTP_ADDR", addr)); err == nil || !strings.Contains(err.Error(), "loopback") {
+			t.Errorf("no-auth on %s must be refused: %v", addr, err)
+		}
+	}
+	for _, addr := range []string{"localhost:8080", "[::1]:8080"} {
+		if _, err := load(t, with(h, "MCP_ALLOW_NO_AUTH", "true", "MCP_HTTP_ADDR", addr)); err != nil {
+			t.Errorf("no-auth on %s: %v", addr, err)
+		}
+	}
+	if c, err := load(t, with(h, "MCP_AUTH_TOKEN", mcpTok, "SEVDESK_ALLOW_CLIENT_TOKEN", "true")); err != nil || c.HTTPEnableSSE {
+		t.Errorf("client tokens must disable legacy SSE: %v %+v", err, c)
 	}
 	if _, err := load(t, with(h, "MCP_ALLOW_NO_AUTH", "true", "SEVDESK_READ_ONLY", "false")); err == nil || !strings.Contains(err.Error(), "write tools over http") {
 		t.Errorf("no-auth with writes must be refused: %v", err)
@@ -143,7 +156,7 @@ func TestSevdeskTokenRules(t *testing.T) {
 	if _, err := load(t, ct); err == nil || !strings.Contains(err.Error(), "http transport") {
 		t.Errorf("client token on stdio: %v", err)
 	}
-	if _, err := load(t, with(ct, "MCP_TRANSPORT", "http", "MCP_ALLOW_NO_AUTH", "true")); err == nil || !strings.Contains(err.Error(), "requires MCP_AUTH_TOKEN") {
+	if _, err := load(t, with(ct, "MCP_TRANSPORT", "http", "MCP_ALLOW_NO_AUTH", "true", "MCP_HTTP_ADDR", "127.0.0.1:8080")); err == nil || !strings.Contains(err.Error(), "requires MCP_AUTH_TOKEN") {
 		t.Errorf("client token without bearer: %v", err)
 	}
 	c, err := load(t, with(ct, "MCP_TRANSPORT", "http", "MCP_AUTH_TOKEN", mcpTok))

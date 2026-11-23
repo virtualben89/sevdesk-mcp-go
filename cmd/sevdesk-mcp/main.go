@@ -250,6 +250,7 @@ func serveHTTP(ctx context.Context, cfg *config.Config, server *mcp.Server, clie
 		Handler:           buildHandler(cfg, server, client, log),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    64 << 10,
 	}
 	errCh := make(chan error, 1)
 	go func() {
@@ -305,7 +306,11 @@ func buildHandler(cfg *config.Config, server *mcp.Server, client *sevdesk.Client
 	if !strings.HasSuffix(cfg.HTTPPath, "/") {
 		mux.Handle(cfg.HTTPPath+"/", protect(streamable))
 	}
-	if cfg.HTTPEnableSSE {
+	// Legacy SSE cannot carry per-client sevDesk tokens (the SDK does not pass
+	// the request's TokenInfo to tool calls over SSE), so it is never served
+	// while client tokens are enabled: a client token must never be silently
+	// replaced by the server token.
+	if cfg.HTTPEnableSSE && !cfg.AllowClientToken {
 		sse := newSSEBinder(mcp.NewSSEHandler(getServer, &mcp.SSEOptions{DisableLocalhostProtection: ownHostCheck}))
 		mux.Handle("/sse", protect(sse))
 		mux.Handle("/sse/", protect(sse))

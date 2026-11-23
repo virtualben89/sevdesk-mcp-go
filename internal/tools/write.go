@@ -254,7 +254,14 @@ func mergeExtra(dst, extra map[string]any, protected ...string) error {
 				return fmt.Errorf("extra.%s cannot be set (it is controlled by the tool; documents are always created as draft)", k)
 			}
 		}
-		if _, exists := dst[k]; !exists {
+		exists := false
+		for dk := range dst {
+			if strings.EqualFold(dk, k) {
+				exists = true
+				break
+			}
+		}
+		if !exists {
 			dst[k] = v
 		}
 	}
@@ -290,7 +297,7 @@ func contactBody(f ContactFields, create bool) (map[string]any, error) {
 			b["category"] = ref("Category", 3)
 		}
 	}
-	if err := mergeExtra(b, f.Extra); err != nil {
+	if err := mergeExtra(b, f.Extra, "objectName", "mapAll", "id"); err != nil {
 		return nil, err
 	}
 	return b, nil
@@ -600,6 +607,10 @@ func (r *Registry) uploadVoucherFile(ctx context.Context, in UploadVoucherFileIn
 				return nil, errors.New("path is outside SEVDESK_UPLOAD_DIR")
 			}
 		}
+		// Stat before open: opening a FIFO or device could block the call.
+		if st, err := root.Stat(rel); err != nil || !st.Mode().IsRegular() {
+			return nil, errors.New("path is not a regular file inside SEVDESK_UPLOAD_DIR (missing, not a regular file, or escapes the directory)")
+		}
 		f, err := root.Open(rel) // os.Root refuses ".." and symlinks leaving the directory
 		if err != nil {
 			return nil, errors.New("cannot open file inside SEVDESK_UPLOAD_DIR (missing, or path escapes the directory)")
@@ -885,6 +896,11 @@ func (r *Registry) registerBooking() {
 			if in.Subject == "" || in.Text == "" {
 				return nil, errors.New("subject and text are required")
 			}
+			for name, list := range map[string]string{"cc": in.CC, "bcc": in.BCC} {
+				if err := checkEmailList(list); err != nil {
+					return nil, fmt.Errorf("%s: %w", name, err)
+				}
+			}
 			b := map[string]any{"toEmail": in.To, "subject": in.Subject, "text": in.Text, "copy": in.CopyToMe}
 			putIf(b, "ccEmail", in.CC)
 			putIf(b, "bccEmail", in.BCC)
@@ -952,4 +968,23 @@ func (r *Registry) documentAction(ctx context.Context, in DocumentActionInput) (
 		return r.send(ctx, http.MethodPost, base+"/cancelInvoice", nil)
 	}
 	return nil, errors.New("action must be enshrine, mark_sent, reset_to_open, reset_to_draft or cancel")
+}
+
+// checkEmailList validates a comma separated list of at most 10 plain
+// addresses (no display names, no header separators).
+func checkEmailList(s string) error {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	if len(parts) > 10 {
+		return errors.New("at most 10 addresses")
+	}
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if !strings.Contains(p, "@") || strings.ContainsAny(p, " \r\n;<>\"") {
+			return fmt.Errorf("%q is not a single e-mail address", p)
+		}
+	}
+	return nil
 }
