@@ -1,0 +1,156 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/sevdesk-mcp-go
+
+# Third-party actions are pinned to commit SHAs; Dependabot keeps them current.
+jobs:
+  test:
+    name: Lint & unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - run: go vet ./...
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./...
+      - run: go test -race -count=1 ./...
+
+  docker:
+    name: Docker image
+    needs: [test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write # keyless signing of the provenance attestation
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        id: meta
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=edge,branch=main
+            type=sha
+      - name: Build for smoke test (amd64)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          load: true
+          tags: sevdesk-mcp:smoke
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            COMMIT=${{ github.sha }}
+          cache-from: type=gha
+          # Pull requests read the cache but never write it (no cache poisoning).
+          cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max' || '' }}
+      - name: Smoke test image
+        run: |
+          docker image ls sevdesk-mcp:smoke --format 'size: {{.Size}}'
+          docker run --rm sevdesk-mcp:smoke version
+          docker run -d --name smoke -p 8080:8080 \
+            -e SEVDESK_API_TOKEN=0123456789abcdef0123456789abcdef -e MCP_AUTH_TOKEN=ci-smoke-token-0123456789 sevdesk-mcp:smoke
+          sleep 3
+          curl -fsS http://localhost:8080/healthz
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8080/mcp)
+          test "$code" = "401"
+          docker exec smoke /sevdesk-mcp healthcheck
+          docker rm -f smoke
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build & push multi-arch
+        id: push
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            COMMIT=${{ github.sha }}
+          cache-from: type=gha
+          provenance: true
+          sbom: true
+      - name: Attest image provenance
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+  release:
+    name: Release binaries
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+          cache: false # release builds never restore a cache
+      - name: Build binaries
+        run: |
+          set -e
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 linux/arm darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            os=${target%/*}; arch=${target#*/}
+            ext=""; [ "$os" = "windows" ] && ext=".exe"
+            name="sevdesk-mcp_${GITHUB_REF_NAME}_${os}_${arch}"
+            CGO_ENABLED=0 GOOS=$os GOARCH=$arch GOARM=7 go build -trimpath \
+              -ldflags "-s -w -X main.version=${GITHUB_REF_NAME#v} -X main.commit=${GITHUB_SHA}" \
+              -o "dist/${name}${ext}" ./cmd/sevdesk-mcp
+          done
+          cd dist && sha256sum -- * > checksums.txt
+      - name: Attest binary provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/sevdesk-mcp_*
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sh scripts/release-notes.sh "$GITHUB_REF_NAME" > release-notes.md
+          gh release create "$GITHUB_REF_NAME" dist/* --notes-file release-notes.md --title "$GITHUB_REF_NAME" --verify-tag

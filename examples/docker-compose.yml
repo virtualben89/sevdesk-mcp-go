@@ -1,0 +1,18 @@
+# Run: mkdir -p secrets && openssl rand -hex 24 > secrets/mcp_token && echo <your sevDesk token> > secrets/sevdesk_token
+services:
+  sevdesk-mcp:
+    image: ghcr.io/virtualben89/sevdesk-mcp-go:latest
+    restart: unless-stopped
+    environment:
+      MCP_AUTH_TOKEN_FILE: /run/secrets/mcp_token
+      SEVDESK_API_TOKEN_FILE: /run/secrets/sevdesk_token
+      SEVDESK_READ_ONLY: "true"        # "false" enables draft-creating write tools
+      # SEVDESK_ALLOW_BOOKING: "true"  # book / send / enshrine / delete (needs READ_ONLY=false)
+    secrets: [mcp_token, sevdesk_token]
+    ports: ["127.0.0.1:8080:8080"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+secrets:
+  mcp_token: { file: ./secrets/mcp_token }
+  sevdesk_token: { file: ./secrets/sevdesk_token }
