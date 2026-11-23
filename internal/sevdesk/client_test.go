@@ -206,3 +206,48 @@ func TestRateLimiterPerToken(t *testing.T) {
 		t.Errorf("limiter map unbounded: %d", len(c.limiters))
 	}
 }
+
+// A 5xx on a write can follow a commit (gateway timeout): it must be reported
+// as ambiguous and never retried; 4xx stays a definitive APIError.
+func TestWrite5xxIsAmbiguous(t *testing.T) {
+	for _, code := range []int{500, 502, 503, 504} {
+		var n atomic.Int32
+		c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) { n.Add(1); w.WriteHeader(code) }, Options{})
+		_, err := c.Do(context.Background(), tok, Request{Method: "POST", Path: "/Invoice/Factory/saveInvoice", Body: map[string]any{"a": 1}})
+		var amb *AmbiguousError
+		if !errors.As(err, &amb) || !strings.Contains(err.Error(), "may or may not have been applied") {
+			t.Errorf("%d: want AmbiguousError, got %v", code, err)
+		}
+		var ae *APIError
+		if !errors.As(err, &ae) || ae.Status != code {
+			t.Errorf("%d: status not kept: %v", code, err)
+		}
+		if n.Load() != 1 {
+			t.Errorf("%d: write attempted %d times", code, n.Load())
+		}
+	}
+	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(400) }, Options{})
+	_, err := c.Do(context.Background(), tok, Request{Method: "POST", Path: "/Contact", Body: map[string]any{"a": 1}})
+	var amb *AmbiguousError
+	if errors.As(err, &amb) {
+		t.Errorf("400 must not be ambiguous: %v", err)
+	}
+}
+
+// Minting many client tokens must not reset the limiter of an active token.
+func TestLimiterEvictsLeastRecentlyUsed(t *testing.T) {
+	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {}, Options{RateLimit: 1})
+	active := c.limiter(tok)
+	for i := 0; i < 3*maxLimiters; i++ {
+		c.limiter(fmt.Sprintf("%032x", i+1))
+		if i%10 == 0 {
+			c.limiter(tok) // keep it recently used
+		}
+	}
+	if c.limiter(tok) != active {
+		t.Error("active token's limiter was evicted")
+	}
+	if len(c.limiters) > maxLimiters {
+		t.Errorf("limiter map unbounded: %d", len(c.limiters))
+	}
+}

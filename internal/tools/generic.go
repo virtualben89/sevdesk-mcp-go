@@ -216,14 +216,22 @@ func (r *Registry) call(ctx context.Context, in CallInput) (*mcp.CallToolResult,
 			return nil, errors.New("body is invalid or larger than 1 MiB")
 		}
 	}
-	// Class check on the effective content (query flags, document status in the body).
-	qm := make(map[string]any, len(in.Query))
-	for k, v := range in.Query {
-		qm[k] = v
+	// Class check on the effective content (query flags, document status in
+	// the body). Query flags are judged on the serialised values that are
+	// actually sent, never on the raw model input.
+	qm := make(map[string]any, len(q))
+	for k, vs := range q {
+		qm[k] = strings.Join(vs, ",")
 	}
 	class := sevdesk.EffectiveClass(op, qm, in.Body)
 	if !r.tierAllowed(class) {
 		return nil, tierError(op, class)
+	}
+	// Dry run: anything above read is only previewed, including GETs with
+	// side effects (getPdf without preventSendBy, send-by-printing).
+	if class > sevdesk.ClassRead && r.client.DryRun() {
+		return valueResult(map[string]any{"dry_run": true, "class": class.String(),
+			"would_send": map[string]any{"method": op.Method, "path": in.Path, "query": q.Encode(), "body": in.Body}})
 	}
 	// Collection endpoints return everything without a limit: bound them.
 	autoLimit := false

@@ -275,6 +275,9 @@ func (c *Config) Validate() error {
 		if len(c.AuthTokens) == 0 && !c.ReadOnly {
 			return errors.New("write tools over http need MCP_AUTH_TOKEN: MCP_ALLOW_NO_AUTH=true is only allowed in read-only mode (SEVDESK_READ_ONLY=true)")
 		}
+		if len(c.AuthTokens) == 0 && !loopbackAddr(c.HTTPAddr) {
+			return fmt.Errorf("MCP_ALLOW_NO_AUTH=true requires MCP_HTTP_ADDR to listen on loopback only (e.g. 127.0.0.1:8080), got %q: the Host-header check does not stop network peers", c.HTTPAddr)
+		}
 	default:
 		return fmt.Errorf("unknown transport %q (use stdio or http)", c.Transport)
 	}
@@ -286,6 +289,8 @@ func (c *Config) Validate() error {
 		if len(c.AuthTokens) == 0 {
 			return errors.New("SEVDESK_ALLOW_CLIENT_TOKEN=true requires MCP_AUTH_TOKEN: client sevDesk tokens are only accepted from authenticated MCP clients")
 		}
+		// Legacy SSE cannot deliver per-client tokens to tool calls: disable it.
+		c.HTTPEnableSSE = false
 	}
 	if c.APIToken == "" && !c.AllowClientToken {
 		return errors.New("SEVDESK_API_TOKEN (or SEVDESK_API_TOKEN_FILE) is required; alternatively set SEVDESK_ALLOW_CLIENT_TOKEN=true with the http transport so clients bring their own token")
@@ -296,4 +301,17 @@ func (c *Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+// loopbackAddr reports whether a listen address binds to loopback only.
+func loopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

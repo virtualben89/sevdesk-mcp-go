@@ -96,7 +96,7 @@ type Client struct {
 	opts Options
 
 	mu       sync.Mutex
-	limiters map[string]*rate.Limiter
+	limiters map[string]*limiterEntry
 }
 
 // New creates a client.
@@ -129,7 +129,7 @@ func New(o Options) (*Client, error) {
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
 		opts:     o,
-		limiters: map[string]*rate.Limiter{},
+		limiters: map[string]*limiterEntry{},
 	}, nil
 }
 
@@ -237,18 +237,36 @@ func (c *Client) limiter(token string) *rate.Limiter {
 		return nil
 	}
 	key := Digest(token)
+	now := time.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if l, ok := c.limiters[key]; ok {
-		return l
+	if e, ok := c.limiters[key]; ok {
+		e.last = now
+		return e.l
 	}
-	if len(c.limiters) >= 256 { // bound memory when many client tokens are seen
-		c.limiters = map[string]*rate.Limiter{}
+	// Bound memory when many client tokens are seen: evict the least recently
+	// used entry only, so minting tokens cannot reset the limits of active ones.
+	if len(c.limiters) >= maxLimiters {
+		var oldest string
+		var ot time.Time
+		for k, e := range c.limiters {
+			if oldest == "" || e.last.Before(ot) {
+				oldest, ot = k, e.last
+			}
+		}
+		delete(c.limiters, oldest)
 	}
 	burst := max(1, int(c.opts.RateLimit))
 	l := rate.NewLimiter(rate.Limit(c.opts.RateLimit), burst)
-	c.limiters[key] = l
+	c.limiters[key] = &limiterEntry{l: l, last: now}
 	return l
+}
+
+const maxLimiters = 256
+
+type limiterEntry struct {
+	l    *rate.Limiter
+	last time.Time
 }
 
 func (c *Client) build(ctx context.Context, token string, r Request) (*http.Request, error) {
@@ -362,6 +380,11 @@ func (c *Client) Do(ctx context.Context, token string, r Request) (*Response, er
 		case resp.StatusCode >= 300 && resp.StatusCode <= 399:
 			return nil, &APIError{Method: r.Method, Path: r.Path, Status: resp.StatusCode,
 				Body: "redirect not followed (the API token is only sent to the configured URL); check SEVDESK_BASE_URL"}
+		case !idempotent && resp.StatusCode >= 500:
+			// A 5xx (e.g. a gateway timeout) can arrive after the write was
+			// committed: report it as ambiguous so nobody blindly retries.
+			return nil, &AmbiguousError{Method: r.Method, Path: r.Path,
+				Err: &APIError{Method: r.Method, Path: r.Path, Status: resp.StatusCode, Body: string(data)}}
 		case resp.StatusCode < 200 || resp.StatusCode > 299:
 			return nil, &APIError{Method: r.Method, Path: r.Path, Status: resp.StatusCode, Body: string(data)}
 		}

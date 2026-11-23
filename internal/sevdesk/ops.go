@@ -179,20 +179,34 @@ func classify(o *Operation) Class {
 	return ClassWrite
 }
 
-// truthy reports whether a query/body value means "true".
-func truthy(v any) bool {
+// exactTrue accepts only bool true or the exact string "true" (the form
+// sevDesk is known to honour). Everything else counts as "not set".
+func exactTrue(v any) bool {
 	switch x := v.(type) {
 	case bool:
 		return x
 	case string:
-		s := strings.ToLower(strings.TrimSpace(x))
-		return s == "true" || s == "1"
+		return x == "true"
+	}
+	return false
+}
+
+// clearlyFalse reports whether a flag value is unambiguously "off".
+// Unknown types and any other value count as "on" (fail closed).
+func clearlyFalse(v any) bool {
+	switch x := v.(type) {
+	case nil:
+		return true
+	case bool:
+		return !x
+	case string:
+		return x == "" || x == "false" || x == "0"
 	case json.Number:
-		return x.String() != "0"
+		return x.String() == "0"
 	case float64:
-		return x != 0
+		return x == 0
 	case int:
-		return x != 0
+		return x == 0
 	}
 	return false
 }
@@ -229,11 +243,15 @@ func EffectiveClass(o *Operation, query map[string]any, body map[string]any) Cla
 			c = n
 		}
 	}
-	if o.Method == "GET" && strings.HasSuffix(o.Path, "/getPdf") && !truthy(query["preventSendBy"]) {
+	// Query flags are judged on the exact value that is sent upstream and fail
+	// closed: sevDesk marks a document as sent (and enshrines it) for anything
+	// but a real "true" in preventSendBy (verified live: " true" and "2" send),
+	// and any enshrine value that is not clearly false may enshrine.
+	if o.Method == "GET" && strings.HasSuffix(o.Path, "/getPdf") && !exactTrue(query["preventSendBy"]) {
 		up(ClassBooking)
 	}
 	for _, k := range []string{"enshrine", "enshrineDocuments"} {
-		if truthy(query[k]) {
+		if v, ok := query[k]; ok && !clearlyFalse(v) {
 			up(ClassBooking)
 		}
 	}

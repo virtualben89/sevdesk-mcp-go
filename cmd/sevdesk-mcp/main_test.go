@@ -294,11 +294,11 @@ func TestStreamableSessionBoundToBothTokens(t *testing.T) {
 func TestSSEBoundToTokens(t *testing.T) {
 	up := newUpstream(t)
 	cfg := testConfig(up)
-	cfg.AllowClientToken = true
+	otherToken := "other-mcp-token-0123456789"
+	cfg.AuthTokens = []string{mcpToken, otherToken}
 	ts := startServer(t, cfg)
 	req, _ := http.NewRequest("GET", ts.URL+"/sse", nil)
 	req.Header.Set("Authorization", "Bearer "+mcpToken)
-	req.Header.Set(config.ClientTokenHeader, clientTokA)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	resp, err := http.DefaultClient.Do(req.WithContext(ctx))
@@ -317,22 +317,41 @@ func TestSSEBoundToTokens(t *testing.T) {
 	if endpoint == "" {
 		t.Fatal("no endpoint event")
 	}
-	post := func(sd string) int {
-		hdr := map[string]string{"Authorization": "Bearer " + mcpToken, "Content-Type": "application/json"}
-		if sd != "" {
-			hdr[config.ClientTokenHeader] = sd
-		}
+	post := func(tok string) int {
+		hdr := map[string]string{"Authorization": "Bearer " + tok, "Content-Type": "application/json"}
 		r, _ := raw(t, "POST", ts.URL+endpoint, hdr, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"x","version":"1"}}}`)
 		return r.StatusCode
 	}
-	if c := post(clientTokA); c != 202 {
+	if c := post(mcpToken); c != 202 {
 		t.Fatalf("first post: %d", c)
 	}
-	if c := post(clientTokB); c != 403 {
-		t.Errorf("sevDesk token switch in SSE session: %d", c)
+	if c := post(otherToken); c != 403 {
+		t.Errorf("MCP token switch in SSE session: %d", c)
 	}
-	if c := post(""); c != 403 {
-		t.Errorf("dropping sevDesk token in SSE session: %d", c)
+}
+
+// Legacy SSE cannot carry per-client sevDesk tokens to tool calls (audit
+// finding): with client tokens enabled it must not be served at all, so a
+// client token is never silently replaced by the server token.
+func TestSSEDisabledWithClientTokens(t *testing.T) {
+	up := newUpstream(t)
+	cfg := testConfig(up)
+	cfg.AllowClientToken = true
+	ts := startServer(t, cfg)
+	resp, _ := raw(t, "GET", ts.URL+"/sse", map[string]string{"Authorization": "Bearer " + mcpToken, config.ClientTokenHeader: clientTokA}, "")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("/sse with client tokens enabled: %d, want 404", resp.StatusCode)
+	}
+	// Streamable still delivers the client token upstream.
+	cs, err := connectHTTP(t, ts, map[string]string{"Authorization": "Bearer " + mcpToken, config.ClientTokenHeader: clientTokA})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, isErr := callTool(t, cs, "list_contacts", nil); isErr {
+		t.Fatal(out)
+	}
+	if got := up.lastAuth(); got != clientTokA {
+		t.Errorf("upstream got %q, want the client token", got)
 	}
 }
 

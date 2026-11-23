@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-24
+
 ### Added
 - First version of the sevDesk MCP server: stdio, Streamable HTTP (`/mcp`) and legacy SSE (`/sse`).
 - Read tools for contacts, invoices, credit notes, orders/offers, parts, vouchers, booking accounts,
@@ -26,3 +28,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 ### Security
 - Read-only by default; write and booking tiers are separate opt-in switches and fail closed.
 - Redirects are never followed, base URL must be https, path validation against the operation index.
+- Fixed before the first release after a full security audit (all with regression tests):
+  - `sevdesk_call` `getPdf`: only exactly `preventSendBy=true` counts as read. sevDesk marked drafts as sent
+    **and enshrined them** for values like `" true"` or `2`, which were accepted in read-only mode (verified live).
+  - `sevdesk_call` export `enshrine`/`enshrineDocuments` flags: arrays and values like `yes`/`on`/`2` no longer
+    pass the write tier; every value that is not clearly false needs the booking tier. Flags are judged on the
+    exact serialised value that is sent upstream.
+  - Multi-tenant mode: legacy SSE silently used the server's sevDesk token instead of the client's
+    `X-Sevdesk-Token` (the SDK does not pass request auth to tool calls over SSE). SSE is now disabled whenever
+    `SEVDESK_ALLOW_CLIENT_TOKEN=true`.
+  - `SEVDESK_DRY_RUN` now also previews GET operations with side effects (`getPdf` without `preventSendBy`,
+    send-by-printing, enshrining exports) instead of sending them.
+  - HTTP 5xx answers to writes are reported as ambiguous (may have been applied, look it up before retrying).
+  - **Behaviour change:** `MCP_ALLOW_NO_AUTH=true` requires `MCP_HTTP_ADDR` on loopback; the Host-header check
+    alone does not stop network peers.
+- Hardening: `send_document_email` validates `cc`/`bcc` (max. 10 plain addresses); contact `extra` cannot set
+  `id`/`objectName`/`mapAll`; `extra` never adds case variants of keys the tool already set; per-token rate
+  limiters are evicted least-recently-used instead of being reset wholesale; the upload path is checked for a
+  regular file before it is opened; `MaxHeaderBytes` 64 KiB; `.gitignore` covers `secrets/`.
+
+[Unreleased]: https://github.com/virtualben89/sevdesk-mcp-go/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/virtualben89/sevdesk-mcp-go/releases/tag/v0.1.0
